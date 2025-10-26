@@ -23,7 +23,25 @@ import itertools
 import struct
 import re
 import sys
-from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+
+try:
+    from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+except ModuleNotFoundError:
+    Cs = None
+    CS_ARCH_ARM64 = None
+    CS_MODE_ARM = None
+
+
+def _create_disassembler():
+    """Build a Capstone disassembler instance or raise a helpful error."""
+    if Cs is None:
+        raise RuntimeError(
+            "Capstone is required for disassembly features. Install it with 'pip install capstone'."
+        )
+
+    cs = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+    cs.detail = True
+    return cs
 
 
 # ============================================================
@@ -807,6 +825,7 @@ class Emulator:
                 result = (rn_val + imm_val) & 0xFFFFFFFFFFFFFFFF
                 self.set_reg(rd, result)
                 result_str = f"; {rd} = {rn} + {imm_str} = {rn_val:#x} + {imm_val:#x} = {result:#x}"
+
             elif mnemonic == 'ADD' and len(op_str_parts) == 3: # ADD Xd, Xn, Xm
                 rd, rn, rm = op_str_parts
                 rn_val = self.get_reg(rn)
@@ -814,6 +833,7 @@ class Emulator:
                 result = (rn_val + rm_val) & 0xFFFFFFFFFFFFFFFF
                 self.set_reg(rd, result)
                 result_str = f"; {rd} = {rn} + {rm} = {rn_val:#x} + {rm_val:#x} = {result:#x}"
+
             elif mnemonic == 'SUB' and '#' in op_str: # SUB Xd, Xn, #imm
                 rd, rn, imm_str = op_str_parts
                 imm_val = int(imm_str.replace('#',''), 0)
@@ -821,6 +841,7 @@ class Emulator:
                 result = (rn_val - imm_val) & 0xFFFFFFFFFFFFFFFF
                 self.set_reg(rd, result)
                 result_str = f"; {rd} = {rn} - {imm_str} = {rn_val:#x} - {imm_val:#x} = {result:#x}"
+
             elif mnemonic == 'SUB' and len(op_str_parts) == 3: # SUB Xd, Xn, Xm
                 rd, rn, rm = op_str_parts
                 rn_val = self.get_reg(rn)
@@ -830,38 +851,36 @@ class Emulator:
                 result_str = f"; {rd} = {rn} - {rm} = {rn_val:#x} - {rm_val:#x} = {result:#x}"
 
             # --- Moves ---
-            elif mnemonic == 'MOV' and '#' in op_str: # MOV Xd, #imm (uses MOVZ typically)
+            elif mnemonic == 'MOV' and '#' in op_str: # MOV Xd, #imm
                 rd, imm_str = op_str_parts
                 imm_val = int(imm_str.replace('#',''), 0)
-                # Simple MOVZ implementation assumes imm fits in 16 bits
-                if 0 <= imm_val <= 0xFFFF:
-                     self.set_reg(rd, imm_val)
-                     result_str = f"; {rd} = {imm_val:#x}"
-                else: # Need MOVN/MOVK sequence, not simulated here
-                     result_str = f"; {rd} = {imm_val:#x} (complex immediate)"
+                self.set_reg(rd, imm_val)
+                result_str = f"; {rd} = {imm_val:#x}"
 
             elif mnemonic == 'MOV' and len(op_str_parts) == 2: # MOV Xd, Xn
-                 rd, rn = op_str_parts
-                 rn_val = self.get_reg(rn)
-                 self.set_reg(rd, rn_val)
-                 result_str = f"; {rd} = {rn} = {rn_val:#x}"
+                rd, rn = op_str_parts
+                rn_val = self.get_reg(rn)
+                self.set_reg(rd, rn_val)
+                result_str = f"; {rd} = {rn} = {rn_val:#x}"
 
             # --- Logical ---
-            elif mnemonic == 'AND' and '#' not in op_str: # AND Xd, Xn, Xm
+            elif mnemonic == 'AND' and len(op_str_parts) == 3: # AND Xd, Xn, Xm
                 rd, rn, rm = op_str_parts
                 rn_val = self.get_reg(rn)
                 rm_val = self.get_reg(rm)
                 result = rn_val & rm_val
                 self.set_reg(rd, result)
                 result_str = f"; {rd} = {rn} & {rm} = {rn_val:#x} & {rm_val:#x} = {result:#x}"
-            elif mnemonic == 'ORR' and '#' not in op_str: # ORR Xd, Xn, Xm
+
+            elif mnemonic == 'ORR' and len(op_str_parts) == 3: # ORR Xd, Xn, Xm
                 rd, rn, rm = op_str_parts
                 rn_val = self.get_reg(rn)
                 rm_val = self.get_reg(rm)
                 result = rn_val | rm_val
                 self.set_reg(rd, result)
                 result_str = f"; {rd} = {rn} | {rm} = {rn_val:#x} | {rm_val:#x} = {result:#x}"
-            elif mnemonic == 'EOR' and '#' not in op_str: # EOR Xd, Xn, Xm
+
+            elif mnemonic == 'EOR' and len(op_str_parts) == 3: # EOR Xd, Xn, Xm
                 rd, rn, rm = op_str_parts
                 rn_val = self.get_reg(rn)
                 rm_val = self.get_reg(rm)
@@ -869,12 +888,28 @@ class Emulator:
                 self.set_reg(rd, result)
                 result_str = f"; {rd} = {rn} ^ {rm} = {rn_val:#x} ^ {rm_val:#x} = {result:#x}"
 
-            # Add more instructions here (ANDI, ORRI, EORI, LSL, LSR, etc.)
+            # --- Load/Store (simplified) ---
+            elif mnemonic == 'LDR' and len(op_str_parts) == 2: # LDR Xt, [Xn]
+                rt, rn_mem = op_str_parts
+                if '[' in rn_mem and ']' in rn_mem:
+                    rn = rn_mem.split('[')[1].split(']')[0].strip()
+                    rn_val = self.get_reg(rn)
+                    # Simplified: just move address to destination
+                    self.set_reg(rt, rn_val)
+                    result_str = f"; {rt} = [{rn}] = {rn_val:#x} (simplified)"
+
+            # --- ADRP (simplified) ---
+            elif mnemonic == 'ADRP':
+                if len(op_str_parts) == 2:
+                    rd, imm_str = op_str_parts
+                    # Simplified ADRP: just store a dummy page address
+                    page_base = 0x400000  # Example page base
+                    self.set_reg(rd, page_base)
+                    result_str = f"; {rd} = page_base({imm_str}) = {page_base:#x} (simplified)"
 
         except Exception as e:
-            # Don't crash if parsing/emulation fails, just return empty string
-             # print(f"Emulator error: {e} on {mnemonic} {op_str}") # Optional debug
-             return ""
+            # Don't crash on emulation errors
+            return f"; Emulation error: {str(e)}"
 
         return result_str
 
@@ -883,8 +918,13 @@ class Emulator:
 # ============================================================
 class ARM64InstructionIO:
     def __init__(self):
-        self.cs = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
-        self.cs.detail = True
+        self._cs = None
+
+    def _get_disassembler(self):
+        """Return a cached Capstone disassembler, creating it on demand."""
+        if self._cs is None:
+            self._cs = _create_disassembler()
+        return self._cs
 
     def _print_conversion_result(self, result):
         """Print conversion results in a formatted way"""
@@ -906,7 +946,8 @@ class ARM64InstructionIO:
             value = int(hex_str, 16)
             bytes_le = value.to_bytes(4, 'little')
 
-            for insn in self.cs.disasm(bytes_le, 0):
+            cs = self._get_disassembler()
+            for insn in cs.disasm(bytes_le, 0):
                 return {
                     'hex': f"0x{value:08X}",
                     'asm': f"{insn.mnemonic} {insn.op_str}",
@@ -917,6 +958,8 @@ class ARM64InstructionIO:
 
         except ValueError:
              return {"error": f"Invalid hex string: '{hex_str}'"}
+        except RuntimeError as exc:
+            return {"error": str(exc)}
         except Exception as e:
             return {"error": f"Conversion failed: {str(e)}"}
 
@@ -932,16 +975,16 @@ class ARM64InstructionIO:
                 return self._format_result("nop", encoding) # Use lowercase standard
 
             # ADD/SUB immediate patterns (Match W/X regs OR SP)
-            add_match = re.match(r'ADD\s+([WX]\d+|SP),\s*([WX]\d+|SP),\s*#?(0x[0-9A-F]+|\d+)', asm_text_upper)
+            add_match = re.match(r'ADD\s+([WX]\d+|SP),\s*([WX]\d+|SP),\s*#?(0X[0-9A-F]+|\d+)', asm_text_upper)
             if add_match:
                  return self._encode_add_sub_imm(asm_text_orig, "ADD", add_match)
 
-            sub_match = re.match(r'SUB\s+([WX]\d+|SP),\s*([WX]\d+|SP),\s*#?(0x[0-9A-F]+|\d+)', asm_text_upper)
+            sub_match = re.match(r'SUB\s+([WX]\d+|SP),\s*([WX]\d+|SP),\s*#?(0X[0-9A-F]+|\d+)', asm_text_upper)
             if sub_match:
                 return self._encode_add_sub_imm(asm_text_orig, "SUB", sub_match)
 
             # MOV immediate (using MOVZ)
-            mov_imm_match = re.match(r'MOV\s+([WX])(\d+),\s*#?(0x[0-9A-F]+|\d+)', asm_text_upper)
+            mov_imm_match = re.match(r'MOV\s+([WX])(\d+),\s*#?(0X[0-9A-F]+|\d+)', asm_text_upper)
             if mov_imm_match:
                 return self._encode_mov_imm(asm_text_orig, mov_imm_match)
 
@@ -958,17 +1001,22 @@ class ARM64InstructionIO:
 
     def _parse_register(self, reg_str):
         """Parse register string like X0, W1, SP, XZR into (sf, index)"""
-        reg_str = reg_str.upper()
+        reg_str = reg_str.upper().strip()
+
         if reg_str == 'SP':
-            return 1, 31 # SP is X31
+            return 1, 31  # SP is X31
         elif reg_str in ('XZR', 'WZR'):
-            return 1, 31 # Treat like SP for encoding purposes where applicable, logic handles 0 value
+            return 1, 31  # Zero register is also X31
         elif reg_str.startswith('X'):
-            return 1, int(reg_str[1:])
+            reg_num = reg_str[1:]
+            if reg_num.isdigit():
+                return 1, int(reg_num)
         elif reg_str.startswith('W'):
-            return 0, int(reg_str[1:])
-        else:
-            raise ValueError(f"Invalid register '{reg_str}'")
+            reg_num = reg_str[1:]
+            if reg_num.isdigit():
+                return 0, int(reg_num)
+
+        raise ValueError(f"Invalid register '{reg_str}'")
 
     def _encode_add_sub_imm(self, asm_text, op, match):
         """Encode ADD/SUB immediate instructions, handling SP"""
@@ -980,34 +1028,41 @@ class ARM64InstructionIO:
         except ValueError as e:
             return {"error": str(e)}
 
-        # ADDI/SUBI requires registers to be the same size (or SP which implies 64-bit)
-        # Exception: ADD/SUB SP, SP, #imm is valid
-        if rd_str != 'SP' and rn_str != 'SP' and sf_d != sf_n:
-             return {"error": f"Register size mismatch in {op}"}
-        # If SP is involved, operation must be 64-bit
-        if (rd_str == 'SP' or rn_str == 'SP') and not sf_d: # Check sf_d because dest determines sf bit
-             return {"error": f"{op} with SP requires 64-bit destination (X register or SP)"}
+        # Determine if this is 64-bit operation
+        sf = 1 if (rd_str.startswith('X') or rd_str == 'SP' or rn_str == 'SP') else 0
 
-        sf = 1 if (rd_str.startswith('X') or rd_str == 'SP') else 0
+        # Validate register sizes
+        if rd_str != 'SP' and rn_str != 'SP' and sf_d != sf_n:
+            return {"error": f"Register size mismatch in {op}"}
+
+        # SP operations must be 64-bit
+        if (rd_str == 'SP' or rn_str == 'SP') and not sf:
+            return {"error": f"{op} with SP requires 64-bit destination"}
 
         imm_val = int(imm_str, 0)
         shift = 0
 
-        if 0 <= imm_val <= 0xFFF: # 0 to 4095
+        # Handle the immediate encoding
+        if 0 <= imm_val <= 0xFFF:  # 0 to 4095
             shift = 0
-        elif 0 < imm_val <= (0xFFF << 12) and imm_val % (1 << 12) == 0:
+        elif 0 <= imm_val <= 0xFFFFFF and (imm_val & 0xFFF) == 0:
+            # Multiple of 4096, use LSL #12
             imm_val = imm_val >> 12
-            shift = 1 # LSL #12
+            shift = 1
         else:
-            limit = 0xFFFFFF if sf == 1 else 0xFFF # More complex if shifted? Let's stick to 12bit + shift
-            limit = (0xFFF << 12 | 0xFFF) # Max value representable
-            return {"error": f"Invalid {op} immediate. Must be 0-4095 or a multiple of 4096 up to {limit:#x}"}
+            return {"error": f"Invalid {op} immediate {imm_val:#x}. Must be 0-4095 or a multiple of 4096"}
 
-        # Use 64-bit base if sf=1, 32-bit otherwise
-        base_add = 0x91000000 if sf else 0x11000000
-        base_sub = 0xD1000000 if sf else 0x51000000
+        # Choose the correct base encoding
+        if sf:  # 64-bit
+            base_add = 0x91000000
+            base_sub = 0xD1000000
+        else:   # 32-bit
+            base_add = 0x11000000
+            base_sub = 0x51000000
+
         base = base_add if op == "ADD" else base_sub
 
+        # Assemble the instruction: base | (shift << 22) | (imm12 << 10) | (Rn << 5) | Rd
         encoding = base | (shift << 22) | (imm_val << 10) | (rn << 5) | rd
         return self._format_result(asm_text, encoding)
 
@@ -1061,15 +1116,17 @@ class ARM64InstructionIO:
 
     def _format_result(self, asm_text, encoding):
         """Format conversion result consistently"""
-        disasm_result = self.hex_to_asm(f"{encoding:08X}")
-        canonical_asm = disasm_result.get('asm', asm_text) # Use re-disassembled asm if possible
-
-        # Don't show original asm if it failed re-disassembly
-        if 'error' in disasm_result:
-             asm_to_show = f"<Encoding Error: {disasm_result['error']}>"
+        if Cs is None:
+            asm_to_show = asm_text
         else:
-             asm_to_show = canonical_asm
+            disasm_result = self.hex_to_asm(f"{encoding:08X}")
+            canonical_asm = disasm_result.get('asm', asm_text) # Use re-disassembled asm if possible
 
+            # Don't show original asm if it failed re-disassembly
+            if 'error' in disasm_result:
+                 asm_to_show = f"<Encoding Error: {disasm_result['error']}>"
+            else:
+                 asm_to_show = canonical_asm
 
         return {
             'asm': asm_to_show,
@@ -1086,7 +1143,8 @@ class ARM64InstructionIO:
         while True:
             try:
                 user_input = input("\nGEMi> ").strip()
-                if not user_input: continue
+                if not user_input:
+                    continue
 
                 if user_input.lower() in ['quit', 'exit', 'q']:
                     break
@@ -1099,18 +1157,23 @@ class ARM64InstructionIO:
                     result = self.asm_to_hex(asm_text)
                     self._print_conversion_result(result)
                 elif user_input.lower() == 'help':
-                    print("  Commands: hex <value>, asm <instruction>, arch [version], quit")
+                    print("  Commands:")
+                    print("    hex <value>        - Convert hex to assembly")
+                    print("    asm <instruction>  - Convert assembly to hex")
+                    print("    arch [version]     - Show architecture info")
+                    print("    quit               - Exit")
                 elif user_input.lower().startswith('arch'):
                     parts = user_input.split()
-                    version = parts[1].upper() if len(parts) > 1 else None
-                    show_architecture_info(version)
+                    version = parts[1] if len(parts) > 1 else None
+                    show_architecture_info(version.upper() if version else None)
                 else:
                     print("  Unknown command. Type 'help' for options.")
             except KeyboardInterrupt:
                 print("\nExiting...")
                 break
             except Exception as e:
-                print(f"  \033[91mError during processing: {e}\033[0m")
+                print(f"  \033[91mError: {e}\033[0m")
+                print("  Type 'help' for available commands")
 
 
 # ============================================================
@@ -1452,93 +1515,101 @@ Examples:
     arch_group_args.add_argument("--list-arch", action="store_true", help="List all architectures")
 
     args = parser.parse_args()
-    cs = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
-    io_system = ARM64InstructionIO()
-    locks = parse_locks(args.lock)
-    emulator = Emulator() # Create emulator instance for single opcode exploration
 
-    # --- FIXED ROUTING ORDER ---
-    # Handle conversion first
-    value_to_convert = args.value
-    if args.convert:
-        # If --value wasn't provided, use the positional 'opcode' arg
-        if not value_to_convert and args.opcode:
-            value_to_convert = args.opcode
-            args.opcode = None # Clear opcode so it doesn't fall through
+    try:
+        io_system = ARM64InstructionIO()
+        locks = parse_locks(args.lock)
+        emulator = Emulator() # Create emulator instance for single opcode exploration
+        cs = None
 
-        if not value_to_convert:
-            parser.error("--convert requires a value (use --value or provide value positionally)")
+        # --- FIXED ROUTING ORDER ---
+        # Handle conversion first
+        value_to_convert = args.value
+        if args.convert:
+            # If --value wasn't provided, use the positional 'opcode' arg
+            if not value_to_convert and args.opcode:
+                value_to_convert = args.opcode
+                args.opcode = None # Clear opcode so it doesn't fall through
 
-        if args.convert == "hex":
-            result = io_system.hex_to_asm(value_to_convert)
-        else: # asm
-            result = io_system.asm_to_hex(value_to_convert)
-        io_system._print_conversion_result(result)
-        return
+            if not value_to_convert:
+                parser.error("--convert requires a value (use --value or provide value positionally)")
 
-    # Handle interactive mode
-    if args.interactive:
-        io_system.interactive_converter()
-        return
+            if args.convert == "hex":
+                result = io_system.hex_to_asm(value_to_convert)
+            else: # asm
+                result = io_system.asm_to_hex(value_to_convert)
+            io_system._print_conversion_result(result)
+            return
 
-    # Handle architecture info
-    if args.arch or args.list_arch:
-        show_architecture_info(args.arch.upper() if args.arch else None)
-        return
+        # Handle interactive mode
+        if args.interactive:
+            io_system.interactive_converter()
+            return
 
-    # Handle summary
-    if args.summary:
-        summary_all()
-        return
+        # Handle architecture info
+        if args.arch or args.list_arch:
+            show_architecture_info(args.arch.upper() if args.arch else None)
+            return
 
-    # Handle describe
-    if args.describe:
-        dname = args.describe.upper()
+        # Handle summary
+        if args.summary:
+            summary_all()
+            return
+
+        # Handle describe
+        if args.describe:
+            dname = args.describe.upper()
+            # Handle aliases *before* checking OPCODE_MAP
+            if dname in INSTRUCTION_ALIASES:
+                alias_spec = INSTRUCTION_ALIASES[dname]
+                base_op = alias_spec["base_op"]
+                print(f"\033[96mNote: {dname} is an alias for {base_op} with fields {alias_spec['locked_fields']}\033[0m")
+                # Apply alias locks, user locks take precedence
+                for field, value in alias_spec['locked_fields'].items():
+                    if field not in locks: locks[field] = value
+                dname = base_op # Use the base opcode for description
+
+            if dname not in OPCODE_MAP:
+                print(f"\033[91mUnknown opcode '{dname}' for describe.\033[0m")
+                print("Known opcodes:", ", ".join(sorted(OPCODE_MAP.keys())))
+                return
+            describe_opcode(dname, locks)
+            return
+
+        # Handle group exploration
+        if args.group_name:
+            cs = cs or _create_disassembler()
+            explore_group(args.group_name, cs, args.limit, args.step, args.vary, locks)
+            return
+
+        # Handle single opcode exploration (default if nothing else matched)
+        if not args.opcode:
+            parser.print_help()
+            sys.exit("\n\033[91mError: No opcode, group, or mode specified. See usage examples.\033[0m")
+
+        opname = args.opcode.upper()
+
         # Handle aliases *before* checking OPCODE_MAP
-        if dname in INSTRUCTION_ALIASES:
-            alias_spec = INSTRUCTION_ALIASES[dname]
+        if opname in INSTRUCTION_ALIASES:
+            alias_spec = INSTRUCTION_ALIASES[opname]
             base_op = alias_spec["base_op"]
-            print(f"\033[96mNote: {dname} is an alias for {base_op} with fields {alias_spec['locked_fields']}\033[0m")
-            # Apply alias locks, user locks take precedence
+            print(f"\033[96mNote: {opname} is an alias for {base_op} with locked fields {alias_spec['locked_fields']}\033[0m")
             for field, value in alias_spec['locked_fields'].items():
                 if field not in locks: locks[field] = value
-            dname = base_op # Use the base opcode for description
+            opname = base_op # Use the base opcode for exploration
 
-        if dname not in OPCODE_MAP:
-            print(f"\033[91mUnknown opcode '{dname}' for describe.\033[0m")
+        if opname not in OPCODE_MAP:
+            print(f"\033[91mUnknown opcode '{opname}' for exploration.\033[0m")
             print("Known opcodes:", ", ".join(sorted(OPCODE_MAP.keys())))
             return
-        describe_opcode(dname, locks)
-        return
 
-    # Handle group exploration
-    if args.group_name:
-        explore_group(args.group_name, cs, args.limit, args.step, args.vary, locks)
-        return
+        spec = OPCODE_MAP[opname]
+        cs = cs or _create_disassembler()
+        explore_opcode(opname, spec, cs, args.limit, args.step, args.vary, locks, emulator) # Pass emulator
 
-    # Handle single opcode exploration (default if nothing else matched)
-    if not args.opcode:
-        parser.print_help()
-        sys.exit("\n\033[91mError: No opcode, group, or mode specified. See usage examples.\033[0m")
-
-    opname = args.opcode.upper()
-
-    # Handle aliases *before* checking OPCODE_MAP
-    if opname in INSTRUCTION_ALIASES:
-        alias_spec = INSTRUCTION_ALIASES[opname]
-        base_op = alias_spec["base_op"]
-        print(f"\033[96mNote: {opname} is an alias for {base_op} with locked fields {alias_spec['locked_fields']}\033[0m")
-        for field, value in alias_spec['locked_fields'].items():
-            if field not in locks: locks[field] = value
-        opname = base_op # Use the base opcode for exploration
-
-    if opname not in OPCODE_MAP:
-        print(f"\033[91mUnknown opcode '{opname}' for exploration.\033[0m")
-        print("Known opcodes:", ", ".join(sorted(OPCODE_MAP.keys())))
-        return
-
-    spec = OPCODE_MAP[opname]
-    explore_opcode(opname, spec, cs, args.limit, args.step, args.vary, locks, emulator) # Pass emulator
+    except Exception as e:
+        print(f"\033[91mFatal error: {e}\033[0m")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
