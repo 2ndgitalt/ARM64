@@ -60,3 +60,10 @@ def test_emulator_mov_and_sub():
     msg = emu.execute('SUB', 'X0, X0, X1')
     assert emu.get_reg('X0') == 0xC
     assert '; X0 = X0 - X1' in msg
+
+
+def test_add_immediate_encoding_hexadecimal():
+    io = ARM64InstructionIO()
+    result = io.asm_to_hex("ADD X0, X1, #0xa")
+    assert 'error' not in result
+    assert result['hex'] == '0x91002820'
