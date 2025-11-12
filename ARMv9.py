@@ -933,16 +933,16 @@ class ARM64InstructionIO:
                 return self._format_result("nop", encoding) # Use lowercase standard
 
             # ADD/SUB immediate patterns (Match W/X regs OR SP)
-            add_match = re.match(r'ADD\s+([WX]\d+|SP),\s*([WX]\d+|SP),\s*#?(0x[0-9A-F]+|\d+)', asm_text_upper)
+            add_match = re.match(r'ADD\s+([WX]\d+|SP),\s*([WX]\d+|SP),\s*#?(0X[0-9A-F]+|\d+)', asm_text_upper)
             if add_match:
                  return self._encode_add_sub_imm(asm_text_orig, "ADD", add_match)
 
-            sub_match = re.match(r'SUB\s+([WX]\d+|SP),\s*([WX]\d+|SP),\s*#?(0x[0-9A-F]+|\d+)', asm_text_upper)
+            sub_match = re.match(r'SUB\s+([WX]\d+|SP),\s*([WX]\d+|SP),\s*#?(0X[0-9A-F]+|\d+)', asm_text_upper)
             if sub_match:
                 return self._encode_add_sub_imm(asm_text_orig, "SUB", sub_match)
 
             # MOV immediate (using MOVZ)
-            mov_imm_match = re.match(r'MOV\s+([WX])(\d+),\s*#?(0x[0-9A-F]+|\d+)', asm_text_upper)
+            mov_imm_match = re.match(r'MOV\s+([WX])(\d+),\s*#?(0X[0-9A-F]+|\d+)', asm_text_upper)
             if mov_imm_match:
                 return self._encode_mov_imm(asm_text_orig, mov_imm_match)
 
